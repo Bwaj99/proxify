@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: proxify_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: proxify
+      POSTGRES_PASSWORD: proxify_password
+      POSTGRES_DB: proxify_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - proxify_pgdata:/var/lib/postgresql/data
+
+volumes:
+  proxify_pgdata:
