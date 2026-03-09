@@ -1,6 +1,7 @@
 # Proxify
 
 Financial infrastructure for autonomous AI agents: wallets, escrow, signed transfers, policies, and audit.
+The "Stripe for autonomous agents."
 
 **Stack:** TypeScript, Express, Postgres (Drizzle ORM), Ed25519-signed requests, replay protection, idempotency.
 
