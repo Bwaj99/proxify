@@ -15,9 +15,13 @@ export async function createEscrowForAgentB(
   agentBId: string,
   amountCents: number,
   note?: string
-): Promise<{ escrowId: string; fromNewBalanceCents: number }> {
+): Promise<{ escrowId: string; fromNewBalanceCents: number | null }> {
   const result = await agentA.createEscrow(agentBId, amountCents, note);
-  return { escrowId: result.escrowId, fromNewBalanceCents: result.fromNewBalanceCents };
+
+  return {
+    escrowId: result.escrowId,
+    fromNewBalanceCents: result.fromNewBalanceCents,
+  };
 }
 
 /**
@@ -38,7 +42,10 @@ export function verifyTaskOutput(output: TaskOutput): boolean {
 export async function releaseEscrowToAgentB(
   agentA: ProxifyAgent,
   escrowId: string
-): Promise<{ toNewBalanceCents: number }> {
+): Promise<{ toNewBalanceCents: number | null }> {
   const result = await agentA.releaseEscrow(escrowId);
-  return { toNewBalanceCents: result.toNewBalanceCents };
+
+  return {
+    toNewBalanceCents: result.toNewBalanceCents,
+  };
 }

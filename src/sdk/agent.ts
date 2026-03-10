@@ -18,14 +18,19 @@ export interface WalletInfo {
   agentId: string;
   balanceCents: number;
   txCount?: number;
-  transactions?: Array<{ id: string; type: string; amountCents: number; note?: string | null }>;
+  transactions?: Array<{
+    id: string;
+    type: string;
+    amountCents: number;
+    note?: string | null;
+  }>;
 }
 
 export interface PolicyInfo {
   agentId: string;
   maxTxCents: number;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface EscrowInfo {
@@ -35,8 +40,8 @@ export interface EscrowInfo {
   amountCents: number;
   note: string | null;
   status: string;
-  createdAt: Date;
-  releasedAt: Date | null;
+  createdAt: string;
+  releasedAt: string | null;
 }
 
 export interface AuditEvent {
@@ -48,7 +53,7 @@ export interface AuditEvent {
   targetAgentId: string | null;
   amountCents: number | null;
   reason: string | null;
-  createdAt: Date;
+  createdAt: string;
 }
 
 export interface AuditResponse {
@@ -86,6 +91,50 @@ export interface ReleaseEscrowResult {
   toAgentId: string;
   toNewBalanceCents: number | null;
   txReleaseId: string;
+}
+
+export interface PaymentIntentInfo {
+  id: string;
+  fromAgentId: string;
+  toAgentId: string;
+  amountCents: number;
+  note: string | null;
+  status: string;
+  createdAt: string;
+  capturedAt: string | null;
+  expiresAt: string | null;
+}
+
+export interface CreateIntentResult {
+  success: boolean;
+  intent: {
+    id: string;
+    fromAgentId: string;
+    toAgentId: string;
+    amountCents: number;
+    note: string | null;
+    status: string;
+    expiresAt: string | null;
+  };
+}
+
+export interface CaptureIntentResult {
+  success: boolean;
+  intentId: string;
+  status: string;
+  fromAgentId: string;
+  toAgentId: string;
+  amountCents: number;
+  fromNewBalanceCents: number | null;
+  toNewBalanceCents: number | null;
+  txOutId: string;
+  txInId: string;
+}
+
+export interface CancelIntentResult {
+  success: boolean;
+  intentId: string;
+  status: string;
 }
 
 export class ProxifyAgentError extends Error {
@@ -179,7 +228,7 @@ export class ProxifyAgent {
         parsedBody = rawBody as unknown as T;
       }
     } catch {
-      // If body parsing fails, leave parsedBody as null; rawBody may still contain text.
+      // ignore parse failures
     }
 
     if (!res.ok) {
@@ -202,7 +251,7 @@ export class ProxifyAgent {
     return { status: res.status, data: (parsedBody ?? ({} as T)) as T };
   }
 
-  /** Get wallet balance (no signature required). */
+  /** Get wallet balance only. */
   async getBalance(): Promise<number> {
     const { data } = await this.request<{ balanceCents: number }>({
       method: "GET",
@@ -211,7 +260,7 @@ export class ProxifyAgent {
     return data.balanceCents;
   }
 
-  /** Get full wallet info (balance + recent transactions). */
+  /** Get full wallet info. */
   async getWallet(): Promise<WalletInfo> {
     const { data } = await this.request<WalletInfo>({
       method: "GET",
@@ -220,7 +269,7 @@ export class ProxifyAgent {
     return data;
   }
 
-  /** Get agent policy (maxTxCents). */
+  /** Get agent policy. */
   async getPolicy(): Promise<PolicyInfo> {
     const { data } = await this.request<PolicyInfo>({
       method: "GET",
@@ -229,7 +278,7 @@ export class ProxifyAgent {
     return data;
   }
 
-  /** Transfer to another agent (signed, idempotent). */
+  /** Transfer to another agent (signed + idempotent). */
   async transfer(
     toAgentId: string,
     amountCents: number,
@@ -252,7 +301,7 @@ export class ProxifyAgent {
     toAgentId: string,
     amountCents: number,
     note?: string
-  ): Promise<{ escrowId: string; status: string; fromNewBalanceCents: number }> {
+  ): Promise<{ escrowId: string; status: string; fromNewBalanceCents: number | null }> {
     const { data } = await this.request<CreateEscrowResult>({
       method: "POST",
       path: "/v1/escrows",
@@ -266,10 +315,10 @@ export class ProxifyAgent {
     };
   }
 
-  /** Release escrow (payer only, signed). Body must be {}. */
+  /** Release escrow (payer only, signed). */
   async releaseEscrow(
     escrowId: string
-  ): Promise<{ success: boolean; status: string; toNewBalanceCents: number }> {
+  ): Promise<{ success: boolean; status: string; toNewBalanceCents: number | null }> {
     const { data } = await this.request<ReleaseEscrowResult>({
       method: "POST",
       path: `/v1/escrows/${escrowId}/release`,
@@ -292,7 +341,7 @@ export class ProxifyAgent {
     return data;
   }
 
-  /** Get recent audit events (optional limit, optional filter by agent). */
+  /** Get recent audit events for this agent. */
   async getAudit(limit?: number): Promise<AuditResponse> {
     const q = limit != null ? `?limit=${Math.min(limit, 1000)}` : "";
     const { data } = await this.request<AuditResponse>({
@@ -302,12 +351,59 @@ export class ProxifyAgent {
     return data;
   }
 
-  /** Get global audit (all events, for dashboard). */
+  /** Get global audit (useful for dashboards). */
   async getAuditGlobal(limit?: number): Promise<AuditResponse> {
     const q = limit != null ? `?limit=${Math.min(limit, 1000)}` : "?limit=100";
     const { data } = await this.request<AuditResponse>({
       method: "GET",
       path: `/v1/audit${q}`,
+    });
+    return data;
+  }
+
+  /** Create payment intent (signed). */
+  async createIntent(
+    toAgentId: string,
+    amountCents: number,
+    note?: string,
+    expiresAt?: string
+  ): Promise<CreateIntentResult> {
+    const { data } = await this.request<CreateIntentResult>({
+      method: "POST",
+      path: "/v1/intents",
+      body: { toAgentId, amountCents, note, expiresAt },
+      signed: true,
+    });
+    return data;
+  }
+
+  /** Get payment intent by id. */
+  async getIntent(intentId: string): Promise<PaymentIntentInfo> {
+    const { data } = await this.request<PaymentIntentInfo>({
+      method: "GET",
+      path: `/v1/intents/${intentId}`,
+    });
+    return data;
+  }
+
+  /** Capture payment intent (signed, payer-only). */
+  async captureIntent(intentId: string): Promise<CaptureIntentResult> {
+    const { data } = await this.request<CaptureIntentResult>({
+      method: "POST",
+      path: `/v1/intents/${intentId}/capture`,
+      body: {},
+      signed: true,
+    });
+    return data;
+  }
+
+  /** Cancel payment intent (signed, payer-only). */
+  async cancelIntent(intentId: string): Promise<CancelIntentResult> {
+    const { data } = await this.request<CancelIntentResult>({
+      method: "POST",
+      path: `/v1/intents/${intentId}/cancel`,
+      body: {},
+      signed: true,
     });
     return data;
   }

@@ -2,8 +2,9 @@ import "dotenv/config";
 import express from "express";
 import { randomUUID, verify } from "crypto";
 import { z } from "zod";
-import { buildMessage } from "./auth";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 
+import { buildMessage } from "./auth";
 import { db } from "./db";
 import {
   orgs,
@@ -15,9 +16,8 @@ import {
   escrows as escrowsTable,
   auditEvents as auditEventsTable,
   idempotencyKeys,
+  paymentIntents,
 } from "./schema";
-
-import { and, desc, eq, or, sql } from "drizzle-orm";
 
 const app = express();
 
@@ -41,9 +41,11 @@ app.get("/health/db", async (_req, res) => {
     return res.json({ ok: true });
   } catch (err: any) {
     console.error("DB health check failed:", err?.message ?? err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "DB connection failed", message: err?.message ?? String(err) });
+    return res.status(500).json({
+      ok: false,
+      error: "DB connection failed",
+      message: err?.message ?? String(err),
+    });
   }
 });
 
@@ -120,19 +122,18 @@ async function verifySignedRequestOr401(params: {
     return { ok: false as const };
   }
 
-  // Timestamp window (2 minutes)
   const ts = Number(timestamp);
   if (!Number.isFinite(ts)) {
     res.status(401).json({ error: "Bad timestamp" });
     return { ok: false as const };
   }
+
   const ageMs = Math.abs(Date.now() - ts);
   if (ageMs > 2 * 60 * 1000) {
     res.status(401).json({ error: "Timestamp too old" });
     return { ok: false as const };
   }
 
-  // Replay protection
   cleanupNonces(agentId);
   if (!usedNoncesByAgent.has(agentId)) usedNoncesByAgent.set(agentId, new Map());
   const nonceMap = usedNoncesByAgent.get(agentId)!;
@@ -143,7 +144,6 @@ async function verifySignedRequestOr401(params: {
   }
   nonceMap.set(nonce, Date.now());
 
-  // Lookup agent public key
   const agentRow = await db
     .select()
     .from(agents)
@@ -155,15 +155,7 @@ async function verifySignedRequestOr401(params: {
     return { ok: false as const };
   }
 
-  // Build canonical message (must match client)
-  const message = buildMessage(
-    agentId,
-    timestamp,
-    nonce,
-    method,
-    path,
-    req.rawBody ?? ""
-  );
+  const message = buildMessage(agentId, timestamp, nonce, method, path, req.rawBody ?? "");
 
   const valid = verify(
     null,
@@ -196,13 +188,11 @@ app.post("/v1/orgs", async (req, res) => {
 
     const id = randomUUID();
 
-    const result = await db.insert(orgs).values({
+    await db.insert(orgs).values({
       id,
       name: parsed.data.name,
       createdAt: new Date(),
     });
-
-    console.log("ORG INSERT RESULT:", result);
 
     await logEvent({
       eventType: "ORG_CREATED",
@@ -212,15 +202,10 @@ app.post("/v1/orgs", async (req, res) => {
 
     return res.status(201).json({ orgId: id, name: parsed.data.name });
   } catch (err: any) {
-    console.error("CREATE ORG ERROR FULL:", err);
-    console.error("CREATE ORG ERROR MESSAGE:", err?.message);
-    console.error("CREATE ORG ERROR CAUSE:", err?.cause);
-    console.error("CREATE ORG ERROR STACK:", err?.stack);
-
+    console.error("CREATE ORG ERROR:", err);
     return res.status(500).json({
       error: "Create org failed",
       message: err?.message ?? String(err),
-      cause: err?.cause ?? null,
     });
   }
 });
@@ -237,7 +222,12 @@ app.post("/v1/controllers", async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid controller data" });
 
-  const orgRow = await db.select().from(orgs).where(eq(orgs.id, parsed.data.orgId)).then((r) => r[0]);
+  const orgRow = await db
+    .select()
+    .from(orgs)
+    .where(eq(orgs.id, parsed.data.orgId))
+    .then((r) => r[0]);
+
   if (!orgRow) return res.status(404).json({ error: "Org not found" });
 
   const id = randomUUID();
@@ -276,7 +266,11 @@ app.post("/v1/agents/register", async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid agent registration data" });
 
-  const orgRow = await db.select().from(orgs).where(eq(orgs.id, parsed.data.orgId)).then((r) => r[0]);
+  const orgRow = await db
+    .select()
+    .from(orgs)
+    .where(eq(orgs.id, parsed.data.orgId))
+    .then((r) => r[0]);
   if (!orgRow) return res.status(404).json({ error: "Org not found" });
 
   const controllerRow = await db
@@ -354,7 +348,11 @@ app.post("/v1/agents/:agentId/protected", async (req: any, res) => {
 app.get("/v1/agents/:agentId/wallet", async (req, res) => {
   const agentId = req.params.agentId;
 
-  const agentRow = await db.select().from(agents).where(eq(agents.id, agentId)).then((r) => r[0]);
+  const agentRow = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .then((r) => r[0]);
   if (!agentRow) return res.status(404).json({ error: "Agent not found" });
 
   const walletRow = await db
@@ -383,12 +381,16 @@ app.get("/v1/agents/:agentId/wallet", async (req, res) => {
 });
 
 /**
- * Wallet fund (not signed for demo simplicity; you can sign this later)
+ * Wallet fund (not signed for demo simplicity)
  */
 app.post("/v1/agents/:agentId/wallet/fund", async (req, res) => {
   const agentId = req.params.agentId;
 
-  const agentRow = await db.select().from(agents).where(eq(agents.id, agentId)).then((r) => r[0]);
+  const agentRow = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .then((r) => r[0]);
   if (!agentRow) return res.status(404).json({ error: "Agent not found" });
 
   const schema = z.object({
@@ -461,7 +463,7 @@ app.post("/v1/tx/transfer", async (req: any, res) => {
   const idempotencyKey = req.header("Idempotency-Key") as string | undefined;
   if (!idempotencyKey) {
     return res.status(400).json({ error: "Missing Idempotency-Key header" });
-}
+  }
 
   const schema = z.object({
     toAgentId: z.string().uuid(),
@@ -477,12 +479,11 @@ app.post("/v1/tx/transfer", async (req: any, res) => {
     .from(idempotencyKeys)
     .where(eq(idempotencyKeys.key, idempotencyKey))
     .then((rows) => rows[0]);
-  
+
   if (existingIdempotent) {
     return res.status(200).json(existingIdempotent.responseJson);
-}
+  }
 
-  // Verify signature (path must match client)
   const auth = await verifySignedRequestOr401({
     req,
     res,
@@ -493,7 +494,11 @@ app.post("/v1/tx/transfer", async (req: any, res) => {
   if (!auth.ok) return;
 
   const fromAgent = auth.agentRow;
-  const toAgent = await db.select().from(agents).where(eq(agents.id, parsed.data.toAgentId)).then((r) => r[0]);
+  const toAgent = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, parsed.data.toAgentId))
+    .then((r) => r[0]);
   if (!toAgent) return res.status(404).json({ error: "To agent not found" });
 
   const amount = parsed.data.amountCents;
@@ -501,7 +506,6 @@ app.post("/v1/tx/transfer", async (req: any, res) => {
   const txInId = randomUUID();
   const now = new Date();
 
-  // Policy check (from DB)
   const policyRow = await db
     .select()
     .from(policiesTable)
@@ -612,6 +616,7 @@ app.post("/v1/tx/transfer", async (req: any, res) => {
     .from(walletsTable)
     .where(eq(walletsTable.agentId, fromAgentId))
     .then((r) => r[0]);
+
   const toWalletAfter = await db
     .select()
     .from(walletsTable)
@@ -627,17 +632,430 @@ app.post("/v1/tx/transfer", async (req: any, res) => {
     toNewBalanceCents: toWalletAfter?.balanceCents ?? null,
     txOutId,
     txInId,
-};
+  };
 
-await db.insert(idempotencyKeys).values({
-  key: idempotencyKey,
-  agentId: fromAgentId,
-  endpoint: "/v1/tx/transfer",
-  responseJson: responseBody,
-  createdAt: new Date(),
+  await db.insert(idempotencyKeys).values({
+    key: idempotencyKey,
+    agentId: fromAgentId,
+    endpoint: "/v1/tx/transfer",
+    responseJson: responseBody,
+    createdAt: new Date(),
+  });
+
+  return res.status(201).json(responseBody);
 });
 
-return res.status(201).json(responseBody);
+/**
+ * Payment Intent create (SIGNED)
+ * Creates a conditional payment instruction without immediately moving funds.
+ */
+app.post("/v1/intents", async (req: any, res) => {
+  const fromAgentId = req.header("X-Agent-Id") as string | undefined;
+  if (!fromAgentId) return res.status(401).json({ error: "Missing X-Agent-Id" });
+
+  const schema = z.object({
+    toAgentId: z.string().uuid(),
+    amountCents: z.number().int().positive(),
+    note: z.string().optional(),
+    expiresAt: z.string().datetime().optional(),
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid payment intent request" });
+  }
+
+  const auth = await verifySignedRequestOr401({
+    req,
+    res,
+    agentId: fromAgentId,
+    method: "POST",
+    path: "/v1/intents",
+  });
+  if (!auth.ok) return;
+
+  const fromAgent = auth.agentRow;
+
+  const toAgent = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, parsed.data.toAgentId))
+    .then((r) => r[0]);
+
+  if (!toAgent) {
+    return res.status(404).json({ error: "To agent not found" });
+  }
+
+  const policyRow = await db
+    .select()
+    .from(policiesTable)
+    .where(eq(policiesTable.agentId, fromAgentId))
+    .then((r) => r[0]);
+
+  if (!policyRow) return res.status(404).json({ error: "Policy not found for sender" });
+
+  if (parsed.data.amountCents > policyRow.maxTxCents) {
+    await logEvent({
+      eventType: "INTENT_FAILED",
+      orgId: fromAgent.orgId,
+      controllerId: fromAgent.controllerId,
+      agentId: fromAgentId,
+      actorAgentId: fromAgentId,
+      targetAgentId: parsed.data.toAgentId,
+      amountCents: parsed.data.amountCents,
+      reason: "Intent exceeds policy maxTxCents",
+      metadata: { maxTxCents: policyRow.maxTxCents, note: parsed.data.note },
+    });
+
+    return res.status(403).json({
+      error: "Intent exceeds policy maxTxCents",
+      maxTxCents: policyRow.maxTxCents,
+      attemptedAmountCents: parsed.data.amountCents,
+    });
+  }
+
+  const intentId = randomUUID();
+
+  await db.insert(paymentIntents).values({
+    id: intentId,
+    fromAgentId,
+    toAgentId: parsed.data.toAgentId,
+    amountCents: parsed.data.amountCents,
+    note: parsed.data.note ?? null,
+    status: "CREATED",
+    createdAt: new Date(),
+    capturedAt: null,
+    expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : null,
+  });
+
+  await logEvent({
+    eventType: "INTENT_CREATED",
+    orgId: fromAgent.orgId,
+    controllerId: fromAgent.controllerId,
+    agentId: fromAgentId,
+    actorAgentId: fromAgentId,
+    targetAgentId: parsed.data.toAgentId,
+    amountCents: parsed.data.amountCents,
+    metadata: {
+      intentId,
+      note: parsed.data.note ?? null,
+      expiresAt: parsed.data.expiresAt ?? null,
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    intent: {
+      id: intentId,
+      fromAgentId,
+      toAgentId: parsed.data.toAgentId,
+      amountCents: parsed.data.amountCents,
+      note: parsed.data.note ?? null,
+      status: "CREATED",
+      expiresAt: parsed.data.expiresAt ?? null,
+    },
+  });
+});
+
+/**
+ * Payment Intent read
+ */
+app.get("/v1/intents/:intentId", async (req, res) => {
+  const intentId = req.params.intentId;
+
+  const intent = await db
+    .select()
+    .from(paymentIntents)
+    .where(eq(paymentIntents.id, intentId))
+    .then((r) => r[0]);
+
+  if (!intent) return res.status(404).json({ error: "Intent not found" });
+
+  return res.json(intent);
+});
+
+/**
+ * Payment Intent capture (SIGNED)
+ * Capturing the intent actually moves funds.
+ */
+app.post("/v1/intents/:intentId/capture", async (req: any, res) => {
+  const intentId = req.params.intentId;
+
+  const actorAgentId = req.header("X-Agent-Id") as string | undefined;
+  if (!actorAgentId) return res.status(401).json({ error: "Missing X-Agent-Id" });
+
+  const auth = await verifySignedRequestOr401({
+    req,
+    res,
+    agentId: actorAgentId,
+    method: "POST",
+    path: `/v1/intents/${intentId}/capture`,
+  });
+  if (!auth.ok) return;
+
+  const actorAgent = auth.agentRow;
+
+  const intent = await db
+    .select()
+    .from(paymentIntents)
+    .where(eq(paymentIntents.id, intentId))
+    .then((r) => r[0]);
+
+  if (!intent) return res.status(404).json({ error: "Intent not found" });
+
+  if (actorAgentId !== intent.fromAgentId) {
+    await logEvent({
+      eventType: "INTENT_CAPTURE_FAILED",
+      orgId: actorAgent.orgId,
+      controllerId: actorAgent.controllerId,
+      agentId: intent.fromAgentId,
+      actorAgentId,
+      targetAgentId: intent.toAgentId,
+      amountCents: intent.amountCents,
+      reason: "Only payer can capture intent",
+      metadata: { intentId },
+    });
+
+    return res.status(403).json({
+      error: "Only the payer (fromAgentId) can capture this intent",
+      fromAgentId: intent.fromAgentId,
+      actorAgentId,
+    });
+  }
+
+  if (intent.status !== "CREATED") {
+    return res.status(400).json({
+      error: "Intent is not capturable",
+      status: intent.status,
+    });
+  }
+
+  if (intent.expiresAt && new Date(intent.expiresAt).getTime() < Date.now()) {
+    await db
+      .update(paymentIntents)
+      .set({ status: "EXPIRED" })
+      .where(eq(paymentIntents.id, intentId));
+
+    return res.status(400).json({
+      error: "Intent has expired",
+      status: "EXPIRED",
+    });
+  }
+
+  const policyRow = await db
+    .select()
+    .from(policiesTable)
+    .where(eq(policiesTable.agentId, intent.fromAgentId))
+    .then((r) => r[0]);
+
+  if (!policyRow) return res.status(404).json({ error: "Policy not found for sender" });
+
+  if (intent.amountCents > policyRow.maxTxCents) {
+    await logEvent({
+      eventType: "INTENT_CAPTURE_FAILED",
+      orgId: actorAgent.orgId,
+      controllerId: actorAgent.controllerId,
+      agentId: intent.fromAgentId,
+      actorAgentId,
+      targetAgentId: intent.toAgentId,
+      amountCents: intent.amountCents,
+      reason: "Intent capture exceeds policy maxTxCents",
+      metadata: { intentId, maxTxCents: policyRow.maxTxCents },
+    });
+
+    return res.status(403).json({
+      error: "Intent capture exceeds policy maxTxCents",
+      maxTxCents: policyRow.maxTxCents,
+      attemptedAmountCents: intent.amountCents,
+    });
+  }
+
+  const txOutId = randomUUID();
+  const txInId = randomUUID();
+  const now = new Date();
+
+  try {
+    await db.transaction(async (tx) => {
+      const fromWallet = await tx
+        .select()
+        .from(walletsTable)
+        .where(eq(walletsTable.agentId, intent.fromAgentId))
+        .then((r) => r[0]);
+
+      const toWallet = await tx
+        .select()
+        .from(walletsTable)
+        .where(eq(walletsTable.agentId, intent.toAgentId))
+        .then((r) => r[0]);
+
+      if (!fromWallet || !toWallet) throw new Error("Wallet not found");
+      if (fromWallet.balanceCents < intent.amountCents) throw new Error("Insufficient funds");
+
+      await tx
+        .update(walletsTable)
+        .set({ balanceCents: fromWallet.balanceCents - intent.amountCents })
+        .where(eq(walletsTable.agentId, intent.fromAgentId));
+
+      await tx
+        .update(walletsTable)
+        .set({ balanceCents: toWallet.balanceCents + intent.amountCents })
+        .where(eq(walletsTable.agentId, intent.toAgentId));
+
+      await tx.insert(ledgerTxsTable).values({
+        id: txOutId,
+        agentId: intent.fromAgentId,
+        type: "TRANSFER_OUT",
+        amountCents: intent.amountCents,
+        counterpartyAgentId: intent.toAgentId,
+        note: `Intent capture ${intentId}${intent.note ? ` - ${intent.note}` : ""}`,
+        createdAt: now,
+      });
+
+      await tx.insert(ledgerTxsTable).values({
+        id: txInId,
+        agentId: intent.toAgentId,
+        type: "TRANSFER_IN",
+        amountCents: intent.amountCents,
+        counterpartyAgentId: intent.fromAgentId,
+        note: `Intent capture ${intentId}${intent.note ? ` - ${intent.note}` : ""}`,
+        createdAt: now,
+      });
+
+      await tx
+        .update(paymentIntents)
+        .set({
+          status: "CAPTURED",
+          capturedAt: now,
+        })
+        .where(eq(paymentIntents.id, intentId));
+    });
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+
+    await logEvent({
+      eventType: "INTENT_CAPTURE_FAILED",
+      orgId: actorAgent.orgId,
+      controllerId: actorAgent.controllerId,
+      agentId: intent.fromAgentId,
+      actorAgentId,
+      targetAgentId: intent.toAgentId,
+      amountCents: intent.amountCents,
+      reason: msg,
+      metadata: { intentId },
+    });
+
+    if (msg.includes("Insufficient funds")) {
+      return res.status(400).json({ error: "Insufficient funds" });
+    }
+    if (msg.includes("Wallet not found")) {
+      return res.status(404).json({ error: "Wallet not found" });
+    }
+
+    return res.status(500).json({ error: "Intent capture failed", detail: msg });
+  }
+
+  await logEvent({
+    eventType: "INTENT_CAPTURED",
+    orgId: actorAgent.orgId,
+    controllerId: actorAgent.controllerId,
+    agentId: intent.fromAgentId,
+    actorAgentId: intent.fromAgentId,
+    targetAgentId: intent.toAgentId,
+    amountCents: intent.amountCents,
+    metadata: { intentId, txOutId, txInId },
+  });
+
+  const fromWalletAfter = await db
+    .select()
+    .from(walletsTable)
+    .where(eq(walletsTable.agentId, intent.fromAgentId))
+    .then((r) => r[0]);
+
+  const toWalletAfter = await db
+    .select()
+    .from(walletsTable)
+    .where(eq(walletsTable.agentId, intent.toAgentId))
+    .then((r) => r[0]);
+
+  return res.status(201).json({
+    success: true,
+    intentId,
+    status: "CAPTURED",
+    fromAgentId: intent.fromAgentId,
+    toAgentId: intent.toAgentId,
+    amountCents: intent.amountCents,
+    fromNewBalanceCents: fromWalletAfter?.balanceCents ?? null,
+    toNewBalanceCents: toWalletAfter?.balanceCents ?? null,
+    txOutId,
+    txInId,
+  });
+});
+
+/**
+ * Payment Intent cancel (SIGNED)
+ * Only the payer can cancel, and only before capture.
+ */
+app.post("/v1/intents/:intentId/cancel", async (req: any, res) => {
+  const intentId = req.params.intentId;
+
+  const actorAgentId = req.header("X-Agent-Id") as string | undefined;
+  if (!actorAgentId) return res.status(401).json({ error: "Missing X-Agent-Id" });
+
+  const auth = await verifySignedRequestOr401({
+    req,
+    res,
+    agentId: actorAgentId,
+    method: "POST",
+    path: `/v1/intents/${intentId}/cancel`,
+  });
+  if (!auth.ok) return;
+
+  const actorAgent = auth.agentRow;
+
+  const intent = await db
+    .select()
+    .from(paymentIntents)
+    .where(eq(paymentIntents.id, intentId))
+    .then((r) => r[0]);
+
+  if (!intent) return res.status(404).json({ error: "Intent not found" });
+
+  if (actorAgentId !== intent.fromAgentId) {
+    return res.status(403).json({
+      error: "Only the payer (fromAgentId) can cancel this intent",
+      fromAgentId: intent.fromAgentId,
+      actorAgentId,
+    });
+  }
+
+  if (intent.status !== "CREATED") {
+    return res.status(400).json({
+      error: "Intent is not cancellable",
+      status: intent.status,
+    });
+  }
+
+  await db
+    .update(paymentIntents)
+    .set({ status: "CANCELLED" })
+    .where(eq(paymentIntents.id, intentId));
+
+  await logEvent({
+    eventType: "INTENT_CANCELLED",
+    orgId: actorAgent.orgId,
+    controllerId: actorAgent.controllerId,
+    agentId: intent.fromAgentId,
+    actorAgentId,
+    targetAgentId: intent.toAgentId,
+    amountCents: intent.amountCents,
+    metadata: { intentId },
+  });
+
+  return res.status(200).json({
+    success: true,
+    intentId,
+    status: "CANCELLED",
+  });
 });
 
 /**
@@ -646,7 +1064,11 @@ return res.status(201).json(responseBody);
 app.get("/v1/agents/:agentId/policy", async (req, res) => {
   const agentId = req.params.agentId;
 
-  const agentRow = await db.select().from(agents).where(eq(agents.id, agentId)).then((r) => r[0]);
+  const agentRow = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .then((r) => r[0]);
   if (!agentRow) return res.status(404).json({ error: "Agent not found" });
 
   const policyRow = await db
@@ -670,7 +1092,11 @@ app.get("/v1/agents/:agentId/policy", async (req, res) => {
 app.post("/v1/agents/:agentId/policy", async (req, res) => {
   const agentId = req.params.agentId;
 
-  const agentRow = await db.select().from(agents).where(eq(agents.id, agentId)).then((r) => r[0]);
+  const agentRow = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .then((r) => r[0]);
   if (!agentRow) return res.status(404).json({ error: "Agent not found" });
 
   const schema = z.object({ maxTxCents: z.number().int().positive() });
@@ -679,7 +1105,6 @@ app.post("/v1/agents/:agentId/policy", async (req, res) => {
 
   const now = new Date();
 
-  // upsert
   const existing = await db
     .select()
     .from(policiesTable)
@@ -709,7 +1134,11 @@ app.post("/v1/agents/:agentId/policy", async (req, res) => {
     metadata: { maxTxCents: parsed.data.maxTxCents },
   });
 
-  return res.status(201).json({ success: true, agentId, maxTxCents: parsed.data.maxTxCents });
+  return res.status(201).json({
+    success: true,
+    agentId,
+    maxTxCents: parsed.data.maxTxCents,
+  });
 });
 
 /**
@@ -724,10 +1153,10 @@ app.post("/v1/escrows", async (req: any, res) => {
     amountCents: z.number().int().positive(),
     note: z.string().optional(),
   });
+
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid escrow request" });
 
-  // Verify signature
   const auth = await verifySignedRequestOr401({
     req,
     res,
@@ -739,12 +1168,15 @@ app.post("/v1/escrows", async (req: any, res) => {
 
   const fromAgent = auth.agentRow;
 
-  const toAgent = await db.select().from(agents).where(eq(agents.id, parsed.data.toAgentId)).then((r) => r[0]);
+  const toAgent = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.id, parsed.data.toAgentId))
+    .then((r) => r[0]);
   if (!toAgent) return res.status(404).json({ error: "To agent not found" });
 
   const amount = parsed.data.amountCents;
 
-  // Policy check
   const policyRow = await db
     .select()
     .from(policiesTable)
@@ -870,15 +1302,19 @@ app.post("/v1/escrows", async (req: any, res) => {
 app.get("/v1/escrows/:escrowId", async (req, res) => {
   const escrowId = req.params.escrowId;
 
-  const escrow = await db.select().from(escrowsTable).where(eq(escrowsTable.id, escrowId)).then((r) => r[0]);
+  const escrow = await db
+    .select()
+    .from(escrowsTable)
+    .where(eq(escrowsTable.id, escrowId))
+    .then((r) => r[0]);
+
   if (!escrow) return res.status(404).json({ error: "Escrow not found" });
 
   return res.json(escrow);
 });
 
 /**
- * Escrow release (NOT signed for now)
- * Later: require controller signature or both-party signatures.
+ * Escrow release (SIGNED, payer-only)
  */
 app.post("/v1/escrows/:escrowId/release", async (req: any, res) => {
   const escrowId = req.params.escrowId;
@@ -888,7 +1324,6 @@ app.post("/v1/escrows/:escrowId/release", async (req: any, res) => {
     return res.status(401).json({ error: "Missing X-Agent-Id" });
   }
 
-  // Verify signed request
   const auth = await verifySignedRequestOr401({
     req,
     res,
@@ -910,7 +1345,6 @@ app.post("/v1/escrows/:escrowId/release", async (req: any, res) => {
     return res.status(404).json({ error: "Escrow not found" });
   }
 
-  // Only payer can release
   if (actorAgentId !== escrow.fromAgentId) {
     await logEvent({
       eventType: "TRANSFER_FAILED",
@@ -1021,7 +1455,10 @@ app.get("/v1/audit", async (req, res) => {
 
   const whereClause =
     orgId && agentId
-      ? and(eq(auditEventsTable.orgId, orgId), or(eq(auditEventsTable.agentId, agentId), eq(auditEventsTable.actorAgentId, agentId)))
+      ? and(
+          eq(auditEventsTable.orgId, orgId),
+          or(eq(auditEventsTable.agentId, agentId), eq(auditEventsTable.actorAgentId, agentId))
+        )
       : orgId
       ? eq(auditEventsTable.orgId, orgId)
       : agentId
@@ -1029,7 +1466,12 @@ app.get("/v1/audit", async (req, res) => {
       : undefined;
 
   const events = whereClause
-    ? await db.select().from(auditEventsTable).where(whereClause).orderBy(desc(auditEventsTable.createdAt)).limit(limit)
+    ? await db
+        .select()
+        .from(auditEventsTable)
+        .where(whereClause)
+        .orderBy(desc(auditEventsTable.createdAt))
+        .limit(limit)
     : await db.select().from(auditEventsTable).orderBy(desc(auditEventsTable.createdAt)).limit(limit);
 
   return res.json({ count: events.length, events });
@@ -1051,11 +1493,133 @@ app.get("/v1/audit/agents/:agentId", async (req, res) => {
 });
 
 /**
- * Dashboard — agents, wallets, escrows, recent audit
+ * Dashboard stats — JSON summary for future frontend/dashboard UI
  */
-app.get("/dashboard", async (req, res, next) => {
+app.get("/v1/dashboard/stats", async (_req, res) => {
   try {
-    const [agentsList, escrowsList, events] = await Promise.all([
+    const [agentsList, walletsList, escrowsList, intentsList, recentAudit] = await Promise.all([
+      db.select().from(agents),
+      db.select().from(walletsTable),
+      db.select().from(escrowsTable),
+      db.select().from(paymentIntents),
+      db.select().from(auditEventsTable).orderBy(desc(auditEventsTable.createdAt)).limit(100),
+    ]);
+
+    const totalAgents = agentsList.length;
+
+    const totalWalletBalanceCents = walletsList.reduce(
+      (sum, w) => sum + (w.balanceCents ?? 0),
+      0
+    );
+
+    const lockedEscrows = escrowsList.filter((e) => e.status === "LOCKED");
+    const releasedEscrows = escrowsList.filter((e) => e.status === "RELEASED");
+
+    const totalEscrowNotionalCents = escrowsList.reduce(
+      (sum, e) => sum + (e.amountCents ?? 0),
+      0
+    );
+
+    const openIntents = intentsList.filter((i) => i.status === "CREATED");
+    const capturedIntents = intentsList.filter((i) => i.status === "CAPTURED");
+    const cancelledIntents = intentsList.filter((i) => i.status === "CANCELLED");
+    const expiredIntents = intentsList.filter((i) => i.status === "EXPIRED");
+
+    const recentTransferVolumeCents = recentAudit
+      .filter(
+        (e) =>
+          e.eventType === "TRANSFER_SUCCEEDED" ||
+          e.eventType === "INTENT_CAPTURED" ||
+          e.eventType === "ESCROW_RELEASED"
+      )
+      .reduce((sum, e) => sum + (e.amountCents ?? 0), 0);
+
+    return res.json({
+      totalAgents,
+      totalWalletBalanceCents,
+      lockedEscrowsCount: lockedEscrows.length,
+      releasedEscrowsCount: releasedEscrows.length,
+      totalEscrowNotionalCents,
+      openIntentsCount: openIntents.length,
+      capturedIntentsCount: capturedIntents.length,
+      cancelledIntentsCount: cancelledIntents.length,
+      expiredIntentsCount: expiredIntents.length,
+      recentAuditEventCount: recentAudit.length,
+      recentTransferVolumeCents,
+    });
+  } catch (err: any) {
+    console.error("Dashboard stats error:", err?.message ?? err);
+    return res.status(500).json({
+      error: "Failed to load dashboard stats",
+      message: err?.message ?? String(err),
+    });
+  }
+});
+
+/**
+ * Dashboard feeds — JSON data lists for future frontend/dashboard UI
+ */
+app.get("/v1/dashboard/feeds", async (req, res) => {
+  try {
+    const agentsLimit = Math.min(Number(req.query.agentsLimit) || 25, 100);
+    const escrowsLimit = Math.min(Number(req.query.escrowsLimit) || 25, 100);
+    const intentsLimit = Math.min(Number(req.query.intentsLimit) || 25, 100);
+    const auditLimit = Math.min(Number(req.query.auditLimit) || 50, 200);
+
+    const [agentsList, escrowsList, intentsList, auditList] = await Promise.all([
+      db
+        .select({
+          id: agents.id,
+          orgId: agents.orgId,
+          controllerId: agents.controllerId,
+          createdAt: agents.createdAt,
+          balanceCents: walletsTable.balanceCents,
+        })
+        .from(agents)
+        .leftJoin(walletsTable, eq(agents.id, walletsTable.agentId))
+        .orderBy(desc(agents.createdAt))
+        .limit(agentsLimit),
+
+      db
+        .select()
+        .from(escrowsTable)
+        .orderBy(desc(escrowsTable.createdAt))
+        .limit(escrowsLimit),
+
+      db
+        .select()
+        .from(paymentIntents)
+        .orderBy(desc(paymentIntents.createdAt))
+        .limit(intentsLimit),
+
+      db
+        .select()
+        .from(auditEventsTable)
+        .orderBy(desc(auditEventsTable.createdAt))
+        .limit(auditLimit),
+    ]);
+
+    return res.json({
+      agents: agentsList,
+      escrows: escrowsList,
+      intents: intentsList,
+      auditEvents: auditList,
+    });
+  } catch (err: any) {
+    console.error("Dashboard feeds error:", err?.message ?? err);
+    return res.status(500).json({
+      error: "Failed to load dashboard feeds",
+      message: err?.message ?? String(err),
+    });
+  }
+});
+
+/**
+ * Dashboard — agents, wallets, escrows, intents, recent audit
+ */
+app.get("/dashboard", async (_req, res, next) => {
+  try {
+    const [agentsList, escrowsList, intentsList, events] = await Promise.all([
       db
         .select({
           id: agents.id,
@@ -1075,22 +1639,24 @@ app.get("/dashboard", async (req, res, next) => {
         .limit(50),
       db
         .select()
+        .from(paymentIntents)
+        .orderBy(desc(paymentIntents.createdAt))
+        .limit(50),
+      db
+        .select()
         .from(auditEventsTable)
         .orderBy(desc(auditEventsTable.createdAt))
         .limit(100),
     ]);
 
     const totalAgents = agentsList.length;
-    const totalBalanceCents = agentsList.reduce(
-      (sum, a) => sum + (a.balanceCents ?? 0),
-      0
-    );
+    const totalBalanceCents = agentsList.reduce((sum, a) => sum + (a.balanceCents ?? 0), 0);
     const lockedEscrows = escrowsList.filter((e) => e.status === "LOCKED");
-    const releasedEscrows = escrowsList.filter((e) => e.status === "RELEASED");
-    const totalEscrowCents = escrowsList.reduce(
-      (sum, e) => sum + e.amountCents,
-      0
-    );
+    const totalEscrowCents = escrowsList.reduce((sum, e) => sum + e.amountCents, 0);
+    const openIntents = intentsList.filter((i) => i.status === "CREATED");
+    const capturedIntents = intentsList.filter((i) => i.status === "CAPTURED");
+    const cancelledIntents = intentsList.filter((i) => i.status === "CANCELLED");
+    const expiredIntents = intentsList.filter((i) => i.status === "EXPIRED");
 
     const formatDollars = (cents: number | null | undefined) =>
       `$${(((cents ?? 0) as number) / 100).toFixed(2)}`;
@@ -1117,6 +1683,20 @@ app.get("/dashboard", async (req, res, next) => {
       <td>${formatDollars(e.amountCents)}</td>
       <td>${e.status}</td>
       <td>${e.createdAt}</td>
+    </tr>`
+      )
+      .join("");
+
+    const intentRows = intentsList
+      .map(
+        (i) => `
+    <tr>
+      <td><code>${i.id}</code></td>
+      <td><code>${i.fromAgentId}</code></td>
+      <td><code>${i.toAgentId}</code></td>
+      <td>${formatDollars(i.amountCents)}</td>
+      <td>${i.status}</td>
+      <td>${i.createdAt}</td>
     </tr>`
       )
       .join("");
@@ -1169,7 +1749,7 @@ app.get("/dashboard", async (req, res, next) => {
   <div class="layout">
     <div class="nav"><a href="/dashboard">Dashboard</a> | <a href="/audit-view">Audit log</a></div>
     <h1>Proxify Dashboard</h1>
-    <p class="subtitle">Financial infrastructure for autonomous agents — agents, wallets, escrows, and audit trail.</p>
+    <p class="subtitle">Financial infrastructure for autonomous agents — agents, wallets, intents, escrows, and audit trail.</p>
 
     <div class="cards">
       <div class="card">
@@ -1188,17 +1768,37 @@ app.get("/dashboard", async (req, res, next) => {
         <div class="card-detail">Funds currently locked</div>
       </div>
       <div class="card">
-        <div class="card-label">Value moved</div>
+        <div class="card-label">Escrow notional</div>
         <div class="card-value">${formatDollars(totalEscrowCents)}</div>
-        <div class="card-detail">Total escrow notional (all statuses)</div>
+        <div class="card-detail">Total escrow value (all statuses)</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Open intents</div>
+        <div class="card-value">${openIntents.length}</div>
+        <div class="card-detail">Created but not captured</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Captured intents</div>
+        <div class="card-value">${capturedIntents.length}</div>
+        <div class="card-detail">Settled via intent flow</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Cancelled intents</div>
+        <div class="card-value">${cancelledIntents.length}</div>
+        <div class="card-detail">Cancelled before settlement</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Expired intents</div>
+        <div class="card-value">${expiredIntents.length}</div>
+        <div class="card-detail">Expired before capture</div>
       </div>
     </div>
 
     <div class="section">
-      <h2>Agents &amp; balances</h2>
+      <h2>Agents & balances</h2>
       <table>
         <thead><tr><th>Agent ID</th><th>Org ID</th><th>Balance</th><th>Created</th></tr></thead>
-        <tbody>${agentRows || "<tr><td colspan='4'>No agents yet — run <code>npm run demo</code>.</td></tr>"}</tbody>
+        <tbody>${agentRows || "<tr><td colspan='4'>No agents yet — run the demo.</td></tr>"}</tbody>
       </table>
     </div>
 
@@ -1206,7 +1806,15 @@ app.get("/dashboard", async (req, res, next) => {
       <h2>Open / recent escrows</h2>
       <table>
         <thead><tr><th>Escrow ID</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Created</th></tr></thead>
-        <tbody>${escrowRows || "<tr><td colspan='6'>No escrows yet — the demo will create one.</td></tr>"}</tbody>
+        <tbody>${escrowRows || "<tr><td colspan='6'>No escrows yet.</td></tr>"}</tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Payment intents</h2>
+      <table>
+        <thead><tr><th>Intent ID</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Created</th></tr></thead>
+        <tbody>${intentRows || "<tr><td colspan='6'>No payment intents yet.</td></tr>"}</tbody>
       </table>
     </div>
 
@@ -1214,13 +1822,13 @@ app.get("/dashboard", async (req, res, next) => {
       <h2>Recent audit events</h2>
       <table>
         <thead><tr><th>Time</th><th>Event</th><th>Agent</th><th>Actor</th><th>Target</th><th>Amount</th><th>Reason</th></tr></thead>
-        <tbody>${eventRows || "<tr><td colspan='7'>No events yet — value movements show up here.</td></tr>"}</tbody>
+        <tbody>${eventRows || "<tr><td colspan='7'>No events yet.</td></tr>"}</tbody>
       </table>
     </div>
   </div>
 </body>
 </html>
-  `);
+    `);
   } catch (e) {
     next(e);
   }
@@ -1292,7 +1900,7 @@ app.get("/audit-view", async (req, res, next) => {
   <div class="layout">
     <p><a href="/dashboard">Dashboard</a> | <a href="/audit-view">Audit log</a></p>
     <h2>Audit log (latest ${limit})${filterNote}</h2>
-    <p class="subtitle">Every wallet funding, transfer, policy change, and escrow event leaves a trail here.</p>
+    <p class="subtitle">Every funding, transfer, payment intent, policy change, and escrow event leaves a trail here.</p>
     <form method="get" style="margin-bottom:16px">
       <label>Filter by agent ID&nbsp;
         <input type="text" name="agentId" value="${agentId ?? ""}" placeholder="Agent UUID from dashboard" />
@@ -1317,17 +1925,22 @@ app.get("/audit-view", async (req, res, next) => {
   </div>
 </body>
 </html>
-  `);
+    `);
   } catch (e) {
     next(e);
   }
 });
 
-// Global error handler — ensure API always returns JSON on error
+/**
+ * Global error handler — ensure API always returns JSON on error
+ */
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error("Unhandled error:", err?.message ?? err);
   if (!res.headersSent) {
-    res.status(500).json({ error: "Internal server error", message: err?.message ?? String(err) });
+    res.status(500).json({
+      error: "Internal server error",
+      message: err?.message ?? String(err),
+    });
   }
 });
 
