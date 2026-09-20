@@ -29,6 +29,20 @@
       "when": 1773176987900,
       "tag": "0003_slippery_landau",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789891562712,
+      "tag": "0004_platform_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789891581242,
+      "tag": "0005_audit_immutable",
+      "breakpoints": true
     }
   ]
 }

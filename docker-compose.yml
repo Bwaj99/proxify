@@ -11,6 +11,28 @@ services:
       - "5433:5432"
     volumes:
       - proxify_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxify -d proxify_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # `docker compose --profile app up --build` runs the API itself (production mode).
+  # Set ADMIN_TOKEN in your shell or a .env file first (>= 16 chars).
+  api:
+    profiles: ["app"]
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgresql://proxify:proxify_password@postgres:5432/proxify_db
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN (at least 16 characters)}
+    ports:
+      - "3000:3000"
 
 volumes:
   proxify_pgdata:

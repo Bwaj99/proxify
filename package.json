@@ -1,38 +1,38 @@
 {
-  "name": "agent-economy",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "proxify",
+  "version": "0.2.0",
+  "description": "Financial infrastructure for autonomous AI agents: signed transfers, escrow, payment intents, policies, audit log and webhooks.",
+  "license": "ISC",
+  "private": true,
+  "main": "dist/index.js",
+  "engines": { "node": ">=20" },
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "start": "node --import ts-node/register src/index.ts",
-    "demo": "npx ts-node src/demo/runDemo.ts",
-    "db:ping": "npx ts-node scripts/ping-db.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "demo": "tsx src/demo/runDemo.ts",
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
     "db:studio": "drizzle-kit studio --config=drizzle.config.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "@noble/ed25519": "^3.0.0",
     "dotenv": "^17.3.1",
     "drizzle-orm": "^0.45.1",
     "express": "^5.2.1",
-    "node-fetch": "^2.7.0",
+    "express-rate-limit": "^8.0.0",
     "pg": "^8.20.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.3.0",
     "@types/express": "^5.0.6",
     "@types/node": "^25.3.3",
-    "@types/node-fetch": "^2.6.13",
     "@types/pg": "^8.18.0",
     "drizzle-kit": "^0.31.9",
-    "ts-node": "^10.9.2",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.9.3"
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.0.0"
   }
 }
